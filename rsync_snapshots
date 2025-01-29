@@ -1,0 +1,772 @@
+#!/usr/bin/perl
+
+#--------------------------------------------------------------------------
+# 
+# rsync_snapshots
+#
+# Create snapshots using rsync.
+#
+$VERSION="1.00";
+$RELEASED="Jun  1, 2016";
+#
+# Copyright (C) 2006,2007,2008,2012,2014,2016 Dan D Niles
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+# 02110-1301, USA.
+#
+#--------------------------------------------------------------------------
+#
+# Create snapshots using rsync.
+#
+# Snapshots will be in directories called snap.<datestamp>.
+#
+# This script requires a config file, which by default is
+# /usr/local/etc/rsync_snapshots.conf.  It can be changed with
+# the -conf option.
+#
+# The config file contains lines like:
+#
+# rsync_snapshot( <source>, <dest>, <expire> [, <option>=<value>...] );
+#
+# <source> can be 'host:/path-to-dir/dir/',  'host::module/dir/'
+#          or /path-to-dir/dir/.
+# <dest>   can be an absolute or relative path.  If it is a relative
+#          path, it is relative to <source>, which must be local.
+#          Dest cannot contain a ':'!
+# <expire> is when to expire files, or how long to keep snapshots.
+#          Snapshots older than this will be removed.
+#          The value '0' or 'undef' means keep all snapshots.
+#          Otherwise, the value is in seconds or a time string made 
+#          up of the following parts (where n is any number):
+#
+#             ny  n years
+#             nM  n Months (n*31 days)
+#             nw  n weeks
+#             nd  n days
+#             nh  n hours
+#             nm  n minutes
+#             ns  n seconds
+#             n   n seconds
+#
+#          The following are all equivalent:
+#
+#             "1w1d1h", "8d1h", "193h", "11580m", "694800s", 694800
+#
+#          NOTE: If expire is not a multiple of one day, datestamps
+#                will include an hour and minute. So "7d" (604800s)
+#                would not have hour and minute but "7d1" (604801s)
+#                would. 
+#
+# <option> Set various options.  Supported options are:
+#          exclude=<pat>        Exclude files matching pattern <pat>
+#          exclude_from=<file>  Exclude files matching patterns in <file>
+#          rsync_opts=<opts>    Override the default rsync options.
+#                               (Default is "-xaSH --numeric-ids --delete")
+#          NOTE: exclude and exclude_from may be specified more than once.
+#
+#--------------------------------------------------------------------------
+
+use Getopt::Long;
+use File::Basename;
+
+use strict vars;
+use vars qw( $VERSION $RELEASED );
+use vars qw( $Conf $Max_Delete $Rsync_Opts $LOGFILE );
+use vars qw( %Exec  $Quiet);
+use vars '$Indent';
+
+
+# Were to find the config file.
+$Conf="/usr/local/etc/rsync_snapshots.conf";
+
+# Maximum number of snap directories to delete at one time
+$Max_Delete=5;
+
+# Options to use for rsync
+$Rsync_Opts="-xaSH --numeric-ids --delete";
+
+# Where to send output when -cron is specified
+$LOGFILE="/var/log/rsync_snapshots"; 
+
+$0 =~ s%.*/%%;
+sub print_version {
+    &pr_error("%s Version %s Released %s\n", $0, $VERSION, $RELEASED);
+}
+sub print_usage {
+    &pr_error("Usage: $0 [options]\n");
+}
+sub short_help {
+    &print_version();
+    &print_usage();
+    &pr_error("Use \'$0 -help\' for detailed help.\n");
+} 
+sub help {
+
+    &print_version();
+    &print_usage();
+    print STDERR <<EOF;
+    -h[elp]                 Print help message
+    -V[ersion]              Print version and exit
+    -v[erbose]              Be more verbose 
+    -q[uiet]                Be quiet (about errors)
+    -n[o-execute]           Dont actually copy files, just pretend.
+    -cr[on]                 Send output to log file instead of stdout
+    -co[nf] <conf>          Read config from <conf>.
+                            Defaults to /usr/local/etc/rsync_syanpshots.conf
+    -m[ax-delete] n         Delete at most n old snapshots
+    -d[elete-only]          Only delete old snapshots, dont do rsyncs
+    -e[rrors-to] <email>    Send email of rsync errors to <email>
+EOF
+
+}
+
+use vars qw( $OK $Help $Print_Version $VERBOSE $VV $VVV );
+use vars qw( $Dry_Run $Quiet $Cron $Conf $Delete_Only );
+use vars qw( @Errors $Errors_To );
+
+$Getopt::Long::ignorecase=0;
+$OK=GetOptions("help" => \$Help,
+	       "V|Version|version" => \$Print_Version,
+	       "v|ve|ver|verbose+" => \$VERBOSE,
+	       "vv+" => \$VV,
+	       "vvv+" => \$VVV,
+	       "quiet" => \$Quiet,
+	       "no-execute+" => \$Dry_Run,
+	       "cron" => \$Cron,
+	       "conf=s" => \$Conf,
+	       "max-delete=i" => \$Max_Delete,
+	       "delete-only" => \$Delete_Only,
+	       "errors-to=s" => \$Errors_To,
+	       );
+
+&check_args();
+
+if( $Help ){ &help(); exit; }
+if( !$OK ){ &short_help(); exit 255; }
+if( $Print_Version ){ &print_version(); exit; }
+
+if( $Help || !$OK ){ exit; }
+
+if( $Cron ){
+    print "-START- ";
+    system("/bin/date");
+}
+
+&pr_vvverbose("Reading file %s\n", $Conf);
+package Conf;
+eval {
+    require $main::Conf;
+};
+package main;
+if( $@ ){
+    my @errors=grep( ! /Compilation failed in require/,
+		     split(/\n+/, $@));
+    foreach my $e (@errors){ &pr_error("$e\n"); }
+    push(@Errors, @errors);
+    &pr_error("ERROR: Errors in config file! Aborting!\n");
+    push(@Errors, "Errors in config file! Aborting!");
+}elsif( $Conf && &check_conf_vars() ){
+    &pr_error("ERROR: Errors in config file! Aborting!\n");
+    push(@Errors, "Errors in config file! Aborting!");
+}
+
+&email_errors();
+
+if( $Cron ){
+    print "-END- ";
+    system("/bin/date");
+}
+
+if( @Errors ){
+    exit -1;
+}
+
+exit;
+
+sub check_args
+{
+    if( $VV ){
+	$VERBOSE+=2*$VV;
+    }
+    if( $VVV ){
+	$VERBOSE+=3*$VVV;
+    }
+
+    open SAVOUT, ">&STDOUT";
+    open SAVERR, ">&STDERR";
+    if( $Cron ){
+	open STDOUT, ">>$LOGFILE";
+	open STDERR, ">&STDOUT";
+	$VERBOSE=1;
+	$Quiet=0;
+    }
+
+    if( ! -f $Conf && ! $Help && ! $Print_Version ){
+	print STDERR "ERROR: Cannot open config file: $Conf\n";
+	$OK=0;
+    }
+
+    if( $Dry_Run && !$VERBOSE ){
+	$VERBOSE=1;
+    }
+
+    if( !$Exec{rsync} ){ 
+	if( -x "/usr/bin/which" ){
+	    chomp($Exec{rsync}=`/usr/bin/which rsync`);
+	}
+	if( !$Exec{rsync} ){
+	    if( -x "/usr/bin/rsync" ){
+		$Exec{rsync}="/usr/bin/rsync"; 
+	    }elsif(-x "/usr/local/bin/rsync" ){
+		$Exec{rsync}="/usr/local/bin/rsync";
+	    }else{
+		print STDERR "ERROR: Cannot locate rsync\n";
+		$OK=0;
+	    }
+	}
+    }
+
+    return;
+}
+
+sub email_errors ()
+{
+    if( $Errors_To && @Errors ){
+	unless($Exec{mailx}){ $Exec{mailx}="mailx"; }
+	open( MAIL, "|$Exec{mailx} -s 'rsync_snapshots FAILED!' $Errors_To");
+	foreach my $err (@Errors){
+	    print MAIL $err;
+	    if( $err !~ m/\n/ ){
+		print MAIL "\n";
+	    }
+	}
+	close MAIL;
+    }
+}
+
+exit; 
+
+sub Conf::rsync_snapshot ($$@)
+{
+    my($src)=shift;
+    my($dst)=shift;
+    my($expire)=shift;
+    my(%Opts);
+
+    if( $Conf && &check_conf_vars() ){
+	&pr_error("ERROR: Errors in config file! Aborting!\n");
+	push(@Errors, "Errors in config file! Aborting!");
+	&email_errors();
+	exit -1;
+    }
+
+    &pr_vvverbose("rsync_snapshot(%s,%s,%s,%s);\n",
+		  $src, $dst, $expire, join(",", @_));
+
+    foreach ( @_ ){
+	if( m/=/ ){
+	    my($var,$val)=split(/\s*=\s*/);
+	    if( $var eq "exclude" ||
+		$var eq "exclude_from" ){
+		$Opts{$var}.="$val,";
+	    }
+	    elsif( $var eq "rsync_opts" ){
+		$Opts{$var}=$val;
+	    }else{
+		&pr_error("Error: Unknown option %s to rsync_snapshot.\n",
+			  $var);
+		&pr_error("Skipping %s\n", $src);
+		return -1;
+	    }
+	}
+	else{
+	    &pr_error("Error: Unknown option %s to rsync_snapshot.\n",
+		      $_);
+	    &pr_error("Skipping %s\n", $src);
+	    return -1;
+	}
+    }
+
+    my( $src_host, $src_file, $dst_dir );
+    my($last_snap,$datestamp,$timestamp);
+    my($exclude, @command);
+    
+    # Remove double / and final / from paths
+    $src =~ s%//+%/%; $src =~ s%/$%% unless $src eq "/";
+    $dst =~ s%//+%/%; $dst =~ s%/$%% unless $dst eq "/";
+
+    if( $src =~ m/::/ ){
+	# This is an rsyncd source!
+	($src_host, $src_file)=split(/::/, $src);
+	if( $src_file =~ m/:/ ){
+	    printf( STDERR "ERROR: %s should not contain :!\n", $src_file);
+	    printf( STDERR "       Skipping %s!\n", $src);
+	    return -1;
+	}
+	if( $src_file !~ m%^/% ){
+	    $src_file="/$src_file";
+	}
+    }
+    elsif( $src =~ m/:/ ){
+	# This is a remote host!
+	($src_host, $src_file)=split(/:/, $src);
+	if( $src_file =~ m/:/ ){
+	    printf( STDERR "ERROR: %s should not contain :!\n", $src_file);
+	    printf( STDERR "       Skipping %s!\n", $src);
+	    return -1;
+	}
+    }else{
+	$src_file=$src;
+    }
+	    
+    if( $src_file !~ m%^/% ){
+	printf( STDERR "ERROR: %s: Source must be an absolute path!\n", 
+		$src_file);
+	printf( STDERR "       Skipping %s\n", $src);
+	return -1;
+    }
+
+    if( $src eq $dst ){
+	printf( STDERR "ERROR: %s: dir_name and snap_location ".
+		"cannot be the same!\n", $src);
+	printf( STDERR "       Skipping %s\n", $src);
+	return -1;
+    }
+
+    if( $dst =~ m%^/% ){
+	if( $dst =~ m%^$src/% ){
+	    $exclude=$dst;
+	    $exclude =~ s%$dst/%%;
+	}
+    }elsif( $dst =~ m%:% ){
+	print STDERR "ERROR: Destination CANNOT be remote! (NO \':\' in dest!)\n";
+	printf( STDERR "       Skipping %s\n", $src);
+	return -1;
+    }else{
+	if( $src !~ m%^/% ){
+	    print STDERR "ERROR: Source must be local if dest is relative!\n";
+	    printf( STDERR "       Skipping %s\n", $src);
+	    return -1;
+	}
+	$exclude=$dst;
+	$dst=$src eq "/"?"$src$dst":"$src/$dst";
+    }
+
+    if( ! -d $dst ){
+	printf(STDERR "ERROR: %s: snap_location does not exist, but must!\n",
+	       $dst);
+	printf(STDERR "       Skipping %s\n", $src);
+	return -1;
+    }
+
+    if( $Delete_Only ){
+	&purge_old_snaps($dst, $expire);
+	return 1;
+    }
+
+    $last_snap=&list_datestamps("$dst/snap", 1, 1);
+    &pr_vverbose("Last snapshot: %s\n", $last_snap?$last_snap:"none");
+    $datestamp=&gen_datestamp();
+
+    if( ($expire && ( &to_seconds($expire)%&to_seconds("1d") ||
+	   ( $last_snap && $last_snap =~ m/$datestamp$/ )))){
+	$timestamp=1;
+    }
+
+    push @command, $Exec{rsync};
+
+    if( $Dry_Run == 1 ){
+	push @command, "-n";
+    }
+
+    if( $Cron ){
+	push @command, "--stats";
+    }else{
+	if( $VERBOSE > 1 ){
+	    if( $VERBOSE > 2 ){
+		push @command, "-vP";
+	    }else{
+		push @command, "-v";
+	    }
+	}
+	if( $Quiet ){
+	    push @command, "-q";
+	}
+    }
+
+    if( $Opts{rsync_opts} ){
+	push @command, split(/\s+/, $Opts{rsync_opts});
+    }else{
+	push @command, split(/\s+/, $Rsync_Opts);
+    }
+
+    push @command, "--exclude=.snap";
+
+    if( $exclude ){
+	push @command, "--exclude=$exclude";
+    }
+
+    if( $Opts{exclude} ){
+	foreach my $exclude (split(/,/, $Opts{exclude})) {
+	    push @command, "--exclude=$exclude";
+	}
+    }
+
+    if( $Opts{exclude_from} ){
+	foreach my $exclude_from (split(/,/, $Opts{exclude_from})) {
+	    if( $exclude_from && ! -f $exclude_from ){
+		&pr_error("ERROR: Exclude file %s not found!\n", 
+			  $exclude_from);
+		&pr_error("       Skipping %s\n", $src);
+		return -1;
+	    }
+
+	    push @command, "--exclude-from=$exclude_from";
+	}
+    }
+
+    if( $last_snap && -d $last_snap ){
+	push @command, "--link-dest=$last_snap";
+    }
+
+    push @command, $src eq "/"?"$src":"$src/";
+
+    $dst_dir= sprintf("%s/snap.%s",$dst, &gen_datestamp(0,$timestamp));
+    if( -d $dst_dir ){
+	my($i)=1;
+	while( -d "$dst_dir.$i" ){
+	    $i++;
+	}
+	$dst_dir.=".$i";
+    }
+    push @command, "$dst_dir/";
+
+    if( $Dry_Run ){
+	mkdir $dst_dir, 0700;
+    }
+
+    printf("--xfer begin-- %s\n", scalar localtime(time)) if $VERBOSE;
+    print join " ", @command if $VERBOSE; print "\n" if $VERBOSE;
+    my $ret=system( @command ) unless $Dry_Run > 1 ;
+    printf("--xfer end-- %s\n", scalar localtime(time)) if $VERBOSE;
+
+    if( $ret && ($ret/256 != 24) ){
+	&pr_error("Error: rsync failed (err %d) for %s -> %s\n", 
+		  int($ret/256), $src, $dst);
+	push(@Errors, sprintf("Rsync failed (err %d) for %s -> %s\n",
+			      int($ret/256), $src, $dst));
+	if( $Cron ){
+	    my(@errors)=();
+	    unless( open LOGF, "$LOGFILE" ){
+		printf SAVERR "Cannot open log file %s (%s)\n", $LOGFILE, $?;
+	    }
+	    while(<LOGF>){
+		if( /^-START-/ ){
+		    @errors=();
+		    next;
+		}
+		if( /rsync error:/ ){
+		    push @errors, $_;
+		}
+	    }
+	    close LOGF;
+	    push @Errors, @errors;
+	    push @Errors, "\n";
+	}
+    }else{
+	&purge_old_snaps($dst, $expire);
+    }
+
+    if( $Dry_Run ){
+	rmdir $dst_dir;
+    }
+
+    if( $ret ){ return 0; }
+
+    return 1;
+}
+
+sub purge_old_snaps ( $:$ )
+{
+
+    my($dst)=shift;
+    my($expire)=shift;
+    my($delete);
+
+    &pr_vvverbose("purge_old_snaps(%s,%s);\n", $dst, $expire);
+
+    if( ! $expire ){ return 1; }
+
+    my(@files)=&list_old_datestamps("$dst/snap", $expire);
+    &pr_vvverbose("\@files=[ %s ]\n", join(", ", @files));
+
+    foreach my $file (@files){
+	if( $Max_Delete >= 0 && ++$delete > $Max_Delete ){
+	    printf STDERR ("Warning: Would be deleting more than %s\n",
+			   $Max_Delete);
+	    printf STDERR ("         snap directories! Not deleting any more!\n");
+	    last;
+	}
+	print "/bin/rm -rf $file\n" if $VERBOSE;
+	system("/bin/rm", "-rf", $file) unless $Dry_Run;
+    }
+
+    return 1;
+}
+
+exit;
+
+sub check_conf_vars
+{
+    my($err)=0;
+    foreach my $name (sort keys %Conf::){
+	local *main::sym = $Conf::{$name};
+	if( defined($main::sym) ){
+	    if( $name eq "Errors_To" ){
+		next;
+	    }
+	    push(@Errors, sprintf("Uknown config variable \$%s\n",
+				  $name));
+	    printf SAVERR "ERROR: Uknown config variable \$%s\n", $name;
+	    $err=1;
+	}
+	if( @main::sym ){
+	    push(@Errors, sprintf("Uknown config variable \@%s\n",
+				  $name));
+	    printf SAVERR "ERROR: Uknown config variable \@%s\n", $name;
+	    $err=1;
+	}
+	if( %main::sym ){
+	    push(@Errors, sprintf("Uknown config variable %%%s\n",
+				  $name));
+	    printf SAVERR "ERROR: Uknown config variable %%%s\n", $name;
+	    $err=1;
+	}
+    }
+
+    if( $Conf::Errors_To && !defined($main::Errors_To) ){
+	$main::Errors_To=$Conf::Errors_To; 
+    }
+
+    return $err;
+}
+#exit;
+# Start of datestamps.pl
+#
+# Version 1.0
+# Released 8/2/7
+
+sub gen_datestamp (:$$)
+{
+    my($time)=shift;
+    my($tod)=shift; # Add time of day to datestamp?
+    my(@now, $ext);
+
+    if( $time ){
+	@now=localtime($time);
+    }else{
+	@now=localtime(time);
+    }
+
+    $ext=sprintf("%04d%02d%02d", $now[5]+1900,, $now[4]+1, $now[3]);
+
+    if( $tod ){
+	$ext.=sprintf("_%02d%02d", $now[2], $now[1]);
+    }
+    
+    return $ext;
+}
+
+# list_datestamps( $file [, $num [, $reverse [, $age [, $time]]]] );
+#
+# Return array of file names.
+# In a scalar context, it returns a string listing all the files.
+sub list_datestamps ( $:$$$$ )
+{
+    my($file)=shift;
+    my($num)=shift;     # Only list this many files (0 means all);
+    my($reverse)=shift; # Reverse the order?
+    my($age)=shift;     # list files older than this many seconds
+    my($time)=shift;    # based on this time.
+    
+    my($command);
+    my($target,$count);
+    my(@files,@result);
+
+    &pr_vvverbose("list_datestamps(%s,%s,%s,%s,%s);\n",
+		  $file, $num,$reverse,$age,$time);
+
+    $file=~ s%//%/%g;
+    my($name,$dir)=fileparse($file);
+
+    if( $age ){
+	if(!$time){ $time=time; }
+	$target=&gen_datestamp($time-&to_seconds($age), 1);
+    }
+
+    unless($Exec{find}){ $Exec{find}="find"; }
+    $command="$Exec{find} $dir -maxdepth 1 -name \"$name.*\"";
+    printf("%s\n", $command) if $VERBOSE > 1;
+    chomp(@files=`$command`);
+    if( $reverse ){
+	@files = reverse sort @files;
+    }else{
+	@files = sort @files;
+    }
+
+    $count=0;
+    foreach(@files){
+	if( m/\.(\d{8}(_\d{4})?)(\.\d+)?(\.\w+)?$/ ){
+	    my($stamp)=$1;
+	    if( $age ){
+		if( ($reverse && "$1" gt "$target") ||
+		    (!$reverse && "$1" lt "$target") ){
+		    push(@result, $_);
+		    if( $num && ++$count >= $num ){
+			last;
+		    }
+		}else{
+		    last;
+		}
+	    }else{
+		push(@result, $_);
+		if( $num && ++$count >= $num ){
+		    last;
+		}
+	    }
+	}else{
+	    printf( STDERR "Warning: Ignoring unknown file: %s\n", $_) 
+		unless $Quiet;
+	}
+    }
+
+    if( wantarray ){
+	return  @result ;
+    }else{
+	return join(", ", @result);
+    }
+}
+
+sub list_old_datestamps($:$$$)
+{
+    my($file)=shift;
+    my($age)=shift;     # list files older than this many seconds
+    my($time)=shift;    # based on this time.
+    my($num)=shift;     # Return at most $num files;
+
+    &pr_vvverbose("list_old_datestamps(%s,%s,%s,%s);\n",
+		  $file, $age, $time, $num);
+
+    return &list_datestamps($file,$num,0,$age,$time);
+}
+sub list_new_datestamps($$:$$)
+{
+    my($file)=shift;
+    my($age)=shift;     # list files older than this many seconds
+    my($time)=shift;    # based on this time.
+    my($num)=shift;     # Return at most $num files;
+
+    &pr_vvverbose("list_new(%s,%s,%s,%s);\n",
+		  $file, $age, $time, $num);
+
+    return &list_datestamps($file,$num,1,$age,$time);
+}
+
+sub to_seconds ($)
+{
+    my($time)=shift;
+    my($result)=0;
+
+    if( $time =~ s/(\d+)s// ){ $result+=$1; }
+    if( $time =~ s/(\d+)m// ){ $result+=$1*60; }
+    if( $time =~ s/(\d+)h// ){ $result+=$1*60*60; }
+    if( $time =~ s/(\d+)d// ){ $result+=$1*24*60*60; }
+    if( $time =~ s/(\d+)w// ){ $result+=$1*7*24*60*60; }
+    if( $time =~ s/(\d+)M// ){ $result+=$1*31*24*60*60; }
+    if( $time =~ s/(\d+)y// ){ $result+=$1*366*24*60*60; }
+    if( $time =~ s/^(\d+)$// ){ $result+=$1; }
+    elsif( $time ){
+	printf(STDERR "ERROR: Ignoring unknown time format: %s\n",$time) 
+	    unless $Quiet;
+    }
+
+    return $result;
+}
+
+# End of datestamps.pl
+1;
+#exit;
+# Start of print.pl
+#
+
+sub pr_info
+{
+    my($fmt)=shift;
+
+    printf( $fmt, @_ );
+    return 1;
+}
+
+sub pr_error
+{
+    my($fmt)=shift;
+
+    printf( STDERR $fmt, @_ );
+    return 1;
+}
+
+sub pr_warn
+{
+    my($fmt)=shift;
+
+    printf( STDERR $fmt, @_ );
+    return 1;
+}
+
+sub pr_verbose
+{
+    my($fmt)=shift;
+
+    return 0 unless $VERBOSE;
+
+    printf( "%s", $Indent) if $Indent;
+    printf( $fmt, @_ );
+    return 1;
+}
+
+sub pr_vverbose
+{
+    my($fmt)=shift;
+
+    return 0 unless $VERBOSE > 1;
+
+    printf( "%s", $Indent) if $Indent;
+    printf( $fmt, @_ );
+    return 1;
+}
+
+sub pr_vvverbose
+{
+    my($fmt)=shift;
+
+    return 0 unless $VERBOSE > 2;
+
+    printf( "%s", $Indent) if $Indent;
+    printf( $fmt, @_ );
+    return 1;
+}
+
+# End of print.pl
+1;
