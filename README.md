@@ -27,11 +27,16 @@ rsync_snapshots [-options]
 
 ### Options
 
-- `-conf <config>`: Specify configuration file location
-- `-v`: Increase verbosity
-- `-n`: Dry run mode
-- `-cr`: Run in cron mode (log to file)
-- `-delete-only`: Only remove old snapshots, don't create new ones
+- `--help`: Print help message
+- `--version`: Print version and exit
+- `--verbose`: Be more verbose
+- `--quiet`: Be quiet (about errors)
+- `--no-execute`: Don't actually copy files, just pretend
+- `--cron`: Send output to log file instead of stdout
+- `--conf <conf>`: Read config from <conf>. Defaults to `/usr/local/etc/rsync_snapshots.conf`
+- `--max-delete <n>`: Delete at most n old snapshots
+- `--delete-only`: Only delete old snapshots, don't do rsyncs
+- `--errors-to <email>`: Send email of rsync errors to <email>
 
 ## Configuration
 
@@ -43,7 +48,7 @@ The configuration file uses a function-like syntax: `rsync_snapshot(<source>, <d
 - The <dest> is either an absolute or relative path. If it's relative, it's relative to the <source>.
 - The <expire> value determines when to expire files or how long to keep snapshots.
 - Options can be added with <option>=<value> syntax.
-- Expire values can be in seconds or use a time string format:
+- Expire values use a time string format. The value represents how long to keep snapshots before expiring them. The format consists of the following parts:
 
 ```
 ny n years
@@ -53,7 +58,6 @@ nd n days
 nh n hours
 nm n minutes
 ns n seconds
-n n seconds
 
 examples:
 
@@ -62,7 +66,6 @@ examples:
 "193h"
 "11580m"
 "694800s"
-"694800"
 ```
 #### Options
 Supported options include:
