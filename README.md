@@ -31,7 +31,7 @@ rsync_snapshots [-options]
 - `--version`: Print version and exit
 - `--verbose`: Be more verbose
 - `--quiet`: Be quiet (about errors)
-- `--no-execute`: Don't actually copy files, just pretend
+- `--no-execute`: Don't actually copy files, just pretend (i.e. a dry run mode)
 - `--cron`: Send output to log file instead of stdout
 - `--conf <conf>`: Read config from <conf>. Defaults to `/usr/local/etc/rsync_snapshots.conf`
 - `--max-delete <n>`: Delete at most n old snapshots
@@ -44,10 +44,10 @@ The script uses a configuration file (default `/usr/local/etc/rsync_snapshots.co
 
 ### Configuration File Format
 The configuration file uses a function-like syntax: `rsync_snapshot(<source>, <dest>, <expire> [, <option>=<value>...]);`
-- The <source> can be a remote path (e.g., 'host:/path-to-dir/dir/') or a local path (/path-to-dir/dir/).
-- The <dest> is either an absolute or relative path. If it's relative, it's relative to the <source>.
-- The <expire> value determines when to expire files or how long to keep snapshots.
-- Options can be added with <option>=<value> syntax.
+- The `<source>` can be a remote path (e.g., 'host:/path-to-dir/dir/') or a local path (/path-to-dir/dir/).
+- The `<dest>` is either an absolute or relative path. If it's relative, it's relative to the <source>.
+- The `<expire>` value determines when to expire files or how long to keep snapshots.
+- Options can be added with `<option>=<value>` syntax.
 - Expire values use a time string format. The value represents how long to keep snapshots before expiring them. The format consists of the following parts:
 
 ```
