@@ -6,10 +6,10 @@
 #
 # Create snapshots using rsync.
 #
-$VERSION="1.00";
-$RELEASED="Jun  1, 2016";
+$VERSION="1.01";
+$RELEASED="Jan  8, 2025";
 #
-# Copyright (C) 2006,2007,2008,2012,2014,2016 Dan D Niles
+# Copyright (C) 2006,2007,2008,2012,2014,2016,2025 Dan D Niles
 #
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License
@@ -217,6 +217,7 @@ sub check_args
 	print STDERR "ERROR: Cannot open config file: $Conf\n";
 	$OK=0;
     }
+    if( $Conf !~ m%^/% ){ $Conf = "$ENV{PWD}/$Conf"; }
 
     if( $Dry_Run && !$VERBOSE ){
 	$VERBOSE=1;
@@ -264,6 +265,9 @@ sub Conf::rsync_snapshot ($$@)
     my($dst)=shift;
     my($expire)=shift;
     my(%Opts);
+
+    my $rdest="";
+    my $rfile="";
 
     if( $Conf && &check_conf_vars() ){
 	&pr_error("ERROR: Errors in config file! Aborting!\n");
@@ -320,7 +324,7 @@ sub Conf::rsync_snapshot ($$@)
 	}
     }
     elsif( $src =~ m/:/ ){
-	# This is a remote host!
+	# This is a remote src host!
 	($src_host, $src_file)=split(/:/, $src);
 	if( $src_file =~ m/:/ ){
 	    printf( STDERR "ERROR: %s should not contain :!\n", $src_file);
@@ -350,10 +354,17 @@ sub Conf::rsync_snapshot ($$@)
 	    $exclude=$dst;
 	    $exclude =~ s%$dst/%%;
 	}
-    }elsif( $dst =~ m%:% ){
-	print STDERR "ERROR: Destination CANNOT be remote! (NO \':\' in dest!)\n";
-	printf( STDERR "       Skipping %s\n", $src);
-	return -1;
+    }elsif( $dst =~ m%(^.*?):(.*)% ){
+	$rdest=$1;
+	$rfile=$2;
+	if( $dst !~ m%:/% ){
+	    print STDERR "ERROR: Remote destination MUST be absolute path!\n";
+	    printf( STDERR "       Skipping %s\n", $src);
+	    return -1;
+	}
+	#print STDERR "ERROR: Destination CANNOT be remote! (NO \':\' in dest!)\n";
+	#printf( STDERR "       Skipping %s\n", $src);
+	#return -1;
     }else{
 	if( $src !~ m%^/% ){
 	    print STDERR "ERROR: Source must be local if dest is relative!\n";
@@ -364,11 +375,21 @@ sub Conf::rsync_snapshot ($$@)
 	$dst=$src eq "/"?"$src$dst":"$src/$dst";
     }
 
-    if( ! -d $dst ){
-	printf(STDERR "ERROR: %s: snap_location does not exist, but must!\n",
-	       $dst);
-	printf(STDERR "       Skipping %s\n", $src);
-	return -1;
+    if( $rdest ){
+	my $list = `ssh $rdest "ls -ld $rfile" 2>/dev/null`;
+	if( ! $list ){
+	    printf(STDERR "ERROR: %s: snap_location does not exist, but must!\n",
+		   $dst);
+	    printf(STDERR "       Skipping %s\n", $src);
+	    return -1;
+	}
+    }else{
+	if( ! -d $dst ){
+	    printf(STDERR "ERROR: %s: snap_location does not exist, but must!\n",
+		   $dst);
+	    printf(STDERR "       Skipping %s\n", $src);
+	    return -1;
+	}
     }
 
     if( $Delete_Only ){
@@ -437,8 +458,13 @@ sub Conf::rsync_snapshot ($$@)
 	}
     }
 
-    if( $last_snap && -d $last_snap ){
-	push @command, "--link-dest=$last_snap";
+    if( $last_snap ){
+	if( $rdest && !system("ssh $rdest test -d $last_snap") ){
+	    push @command, "--link-dest=$last_snap";
+	}
+	elsif( -d $last_snap ){
+	    push @command, "--link-dest=$last_snap";
+	}
     }
 
     push @command, $src eq "/"?"$src":"$src/";
@@ -498,6 +524,7 @@ sub Conf::rsync_snapshot ($$@)
     return 1;
 }
 
+# Added support for remote dst
 sub purge_old_snaps ( $:$ )
 {
 
@@ -512,6 +539,10 @@ sub purge_old_snaps ( $:$ )
     my(@files)=&list_old_datestamps("$dst/snap", $expire);
     &pr_vvverbose("\@files=[ %s ]\n", join(", ", @files));
 
+    my $rdest="";
+    if( $dst =~ s/^(.*?):(.*)// ){
+	$rdest=$1;
+    }
     foreach my $file (@files){
 	if( $Max_Delete >= 0 && ++$delete > $Max_Delete ){
 	    printf STDERR ("Warning: Would be deleting more than %s\n",
@@ -519,8 +550,13 @@ sub purge_old_snaps ( $:$ )
 	    printf STDERR ("         snap directories! Not deleting any more!\n");
 	    last;
 	}
-	print "/bin/rm -rf $file\n" if $VERBOSE;
-	system("/bin/rm", "-rf", $file) unless $Dry_Run;
+	my $command="";
+	if( $rdest ){
+	    $command="ssh $rdest ";
+	}
+	$command .= "/bin/rm -rf $file";
+	print "$command" if $VERBOSE;
+	system("$command") unless $Dry_Run;
     }
 
     return 1;
@@ -537,21 +573,21 @@ sub check_conf_vars
 	    if( $name eq "Errors_To" ){
 		next;
 	    }
-	    push(@Errors, sprintf("Uknown config variable \$%s\n",
+	    push(@Errors, sprintf("Unknown config variable \$%s\n",
 				  $name));
-	    printf SAVERR "ERROR: Uknown config variable \$%s\n", $name;
+	    printf SAVERR "ERROR: Unknown config variable \$%s\n", $name;
 	    $err=1;
 	}
 	if( @main::sym ){
-	    push(@Errors, sprintf("Uknown config variable \@%s\n",
+	    push(@Errors, sprintf("Unknown config variable \@%s\n",
 				  $name));
-	    printf SAVERR "ERROR: Uknown config variable \@%s\n", $name;
+	    printf SAVERR "ERROR: Unknown config variable \@%s\n", $name;
 	    $err=1;
 	}
 	if( %main::sym ){
-	    push(@Errors, sprintf("Uknown config variable %%%s\n",
+	    push(@Errors, sprintf("Unknown config variable %%%s\n",
 				  $name));
-	    printf SAVERR "ERROR: Uknown config variable %%%s\n", $name;
+	    printf SAVERR "ERROR: Unknown config variable %%%s\n", $name;
 	    $err=1;
 	}
     }
@@ -608,6 +644,12 @@ sub list_datestamps ( $:$$$$ )
     &pr_vvverbose("list_datestamps(%s,%s,%s,%s,%s);\n",
 		  $file, $num,$reverse,$age,$time);
 
+    my $rdest="";
+    if( $file =~ s/^(.*?):(.*)// ){
+	$rdest=$1;
+	$file=$2;
+    }
+
     $file=~ s%//%/%g;
     my($name,$dir)=fileparse($file);
 
@@ -617,9 +659,17 @@ sub list_datestamps ( $:$$$$ )
     }
 
     unless($Exec{find}){ $Exec{find}="find"; }
-    $command="$Exec{find} $dir -maxdepth 1 -name \"$name.*\"";
+    if( $rdest ){
+	$command="ssh $rdest $Exec{find} $dir -maxdepth 1 -name \"$name.*\"";
+    }else{
+	$command="$Exec{find} $dir -maxdepth 1 -name \"$name.*\"";
+    }
+
     printf("%s\n", $command) if $VERBOSE > 1;
+
     chomp(@files=`$command`);
+    printf("%s\n", join("\n",@files)) if $VERBOSE > 1;
+
     if( $reverse ){
 	@files = reverse sort @files;
     }else{
