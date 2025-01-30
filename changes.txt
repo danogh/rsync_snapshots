@@ -1,6 +1,19 @@
 
 ----------------------------
 
+Release 2.00 b1 2025/01/29
+
+Switch to GNU style options
+Cleaned up remote destination code
+Removed seconds from expire time, doesn't make sense
+Added improved config file sanity checks
+Improved testing of source and destination specifications
+Added ignore .zfs diretories (ZFS snapshots)
+Added test cases (edit environs.sh ; cd test ; ./test_all.sh)
+Fixed list_datestamps for short expires and multiple snapshots
+
+----------------------------
+
 Release 1.01 2025/01/08
 
 Add remote destination
