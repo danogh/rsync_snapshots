@@ -6,25 +6,26 @@
 #
 # Create snapshots using rsync.
 #
-$VERSION="2.00 b1";
-$RELEASED="Jan 29, 2025";
-#
-# Copyright (C) 2006-2008,2012-2016,2025 Dan D Niles
-#
-# This program is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License
-# as published by the Free Software Foundation; either version 2
-# of the License, or (at your option) any later version.
-# 
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-# 
-# You should have received a copy of the GNU General Public License
-# along with this program; if not, write to the Free Software
-# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
-# 02110-1301, USA.
+$VERSION="2.00b2";
+$RELEASED="Feb  1, 2025";
+$GPL=<<"EOGPL";
+
+Copyright (C) 2006,2007,2008,2012,2014,2016,2025 Dan D Niles
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+EOGPL
 #
 #--------------------------------------------------------------------------
 #
@@ -92,9 +93,11 @@ $RELEASED="Jan 29, 2025";
 use File::Basename;
 
 use strict vars;
-use vars qw( $VERSION $RELEASED );
+use vars qw( $VERSION $RELEASED $GPL $CPR $DSC );
+if( $GPL ){ $GPL =~ s/^\s*\n+//; ($CPR,undef,$DSC)=split(/^\s*\n+/m,$GPL); }
 use vars qw( $Conf $Max_Delete $Rsync_Opts $LOGFILE );
 use vars qw( %Exec  $Quiet);
+
 use vars '$Indent';
 
 # -DDN- Change to /etc/ for Linux?
@@ -110,60 +113,72 @@ $Rsync_Opts="-xaSH --numeric-ids --delete";
 # Where to send output when --cron is specified
 $LOGFILE="/var/log/rsync_snapshots"; 
 
-$0 =~ s%.*/%%;
-sub print_version {
-    &pr_error("%s Version %s Released %s\n", $0, $VERSION, $RELEASED);
-}
-sub print_usage {
-    &pr_error("Usage: $0 [options]\n");
-}
-sub short_help {
-    &print_version();
-    &print_usage();
-    &pr_error("Use \'$0 -help\' for detailed help.\n");
-} 
-sub help {
-
-    &print_version();
-    &print_usage();
-    print STDERR <<EOF;
-    -h, --help              Print help message
-    -V, --version           Print version and exit
-    -v, --verbose           Be more verbose 
-    -q, --quiet             Be quiet (about errors)
-    -n, --dry-run           Dont actually copy files, just pretend.
-    --cron                  Send output to log file instead of stdout
-    -c, --conf=<conf>       Read config from <conf>.
-                            Defaults to /usr/local/etc/rsync_syanpshots.conf
-    -m, --max-delete=n      Delete at most n old snapshots
-    -d, --delete-only       Only delete old snapshots, dont do rsyncs
-    -e, --errors-to=<email> Send email of rsync errors to <email>
+use vars qw( $Options $ONL );
+$Options=<<'EOF';
+  -h, --help               Print help message
+  -V, --version            Print version and exit
+  -v, --verbose            Be more verbose 
+  -q, --quiet              Be quiet (about errors)
+  -n, --dry-run            Dont actually copy files, just pretend.
+  --cron                   Send output to log file instead of stdout
+  -c, --conf=<conf>        Read config from <conf>.$ONL
+                           Defaults to /usr/local/etc/rsync_syanpshots.conf$ONL
+  -m, --max-delete=n       Delete at most n old snapshots
+  -d, --delete-only        Only delete old snapshots, dont do rsyncs
+  --errors-to=<email>      Send email of rsync errors to <email>
 EOF
 
-}
-
-use vars qw( $OK $Help $Print_Version $VERBOSE $VV $VVV );
+use vars qw( $OK $Help $Print_Version $VERBOSE );
 use vars qw( $Dry_Run $Quiet $Cron $Conf $Delete_Only );
 use vars qw( @Errors $Errors_To );
 
-# Allowed config file variables
-use vars qw( %Allowed_Conf_Opts );
-%Allowed_Conf_Opts=(
-    Errors_To => 1,
-);
-
-use Getopt::Long qw(:config gnu_getopt ignore_case);
+use Getopt::Long qw(:config gnu_getopt );
 $OK=GetOptions("h|help" => \$Help,
 	       "V|version" => \$Print_Version,
-	       "v|ve|ver|verbose+" => \$VERBOSE,
+	       "v|verbose+" => \$VERBOSE,
 	       "q|quiet" => \$Quiet,
 	       "n|dry-run+" => \$Dry_Run,
 	       "cron" => \$Cron,
 	       "c|conf=s" => \$Conf,
 	       "m|max-delete=i" => \$Max_Delete,
 	       "d|delete-only" => \$Delete_Only,
-	       "e|errors-to=s" => \$Errors_To,
+	       "errors-to=s" => \$Errors_To,
 	       );
+
+use vars qw( $FullPath );
+$FullPath=$0;
+$0 =~ s%.*/%%;
+
+sub print_version {
+    &pr_info("%s %s\n", $0, $VERSION);
+    if( $VERBOSE ){
+	&pr_info("$CPR\n");
+	&pr_info("$DSC\n");
+	&pr_info("Written by Dan D Niles\n");
+    }
+}
+sub print_usage {
+    &pr_error("Usage: $0 [options]\n");
+}
+sub short_help {
+    &print_usage();
+    &pr_error("Use \'$0 --help\' for detailed help.\n");
+} 
+sub help {
+
+    if( $VERBOSE ){ $ONL="\n"; }
+    &pr_info("Generate snapshot backups using rsync.\n\n");
+    &pr_info("Usage: $FullPath [options]\n\n");
+    $Options =~ s/\$ONL/\n/g;
+    &pr_info("Options:\n$Options\n");
+
+}
+
+# Allowed config file variables
+use vars qw( %Allowed_Conf_Opts );
+%Allowed_Conf_Opts=(
+    Errors_To => 1,
+);
 
 &check_args();
 
@@ -234,7 +249,7 @@ sub check_args
     }
 
     if( ! -f $Conf && ! $Help && ! $Print_Version ){
-	print STDERR "ERROR: Cannot open config file: $Conf\n";
+	print STDERR "ERROR: Cannot open config file: '$Conf'\n";
 	$OK=0;
     }
     if( $Conf !~ m%^/% ){ $Conf = "$ENV{PWD}/$Conf"; }
@@ -509,8 +524,8 @@ sub Conf::rsync_snapshot ($$@)
     if( $Opts{exclude_from} ){
 	foreach my $exclude_from (split(/,/, $Opts{exclude_from})) {
 	    if( $exclude_from && ! -f $exclude_from ){
-		&pr_error("ERROR: Exclude file %s not found!\n", $exclude_from);
-		&pr_error("       Skipping %s\n", $src);
+		&pr_error("ERROR: Exclude file '%s' not found!\n", $exclude_from);
+		&pr_error("       Skipping '%s'\n", $src);
 		return -1;
 	    }
 

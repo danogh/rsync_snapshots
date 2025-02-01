@@ -1,7 +1,15 @@
 
 ----------------------------
 
-Release 2.00 b1 2025/01/29
+Beta 2.00b2 2025/01/29
+
+Adjust --help and --version to work with help2man
+Added man.sh to view the man page
+Removed short option "-e", causes confusion if "-ver" used
+
+----------------------------
+
+Beta 2.00b1 2025/01/29
 
 Switch to GNU style options
 Cleaned up remote destination code
